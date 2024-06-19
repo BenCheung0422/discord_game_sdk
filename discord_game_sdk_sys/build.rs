@@ -1,4 +1,9 @@
-use std::{env, path::*};
+use std::{env, fs, path::*};
+use std::fs::{create_dir_all, File};
+use std::io::Write;
+use zip::ZipArchive;
+
+const SDK_VERSION: &str = "3.2.1";
 
 fn main() {
     // DO NOT RELY ON THIS
@@ -6,8 +11,10 @@ fn main() {
         return generate_ffi_bindings(bindgen::builder().header("discord_game_sdk.h"));
     }
 
-    let sdk_path = PathBuf::from(env::var("DISCORD_GAME_SDK_PATH").expect(MISSING_SDK_PATH));
-    println!("cargo:rerun-if-env-changed=DISCORD_GAME_SDK_PATH");
+    let sdk_path = fetch_discord_game_sdk();
+    // println!("cargo:rustc-env=LD_LIBRARY_PATH={}", fs::canonicalize(sdk_path.join("lib/x86_64")).unwrap().display());
+    // println!("cargo:rustc-env=DYLD_LIBRARY_PATH={}", fs::canonicalize(sdk_path.join("lib/x86_64")).unwrap().display());
+    println!("cargo:rustc-link-search={}", fs::canonicalize(sdk_path.join("lib/x86_64")).unwrap().to_str().unwrap());
     println!("cargo:rerun-if-changed={}", sdk_path.display());
 
     generate_ffi_bindings(
@@ -20,6 +27,66 @@ fn main() {
         verify_installation(&target, &sdk_path);
         configure_linkage(&target, &sdk_path);
     }
+}
+
+fn fetch_discord_game_sdk() -> PathBuf {
+    let mut sdk_version = SDK_VERSION.to_string();
+    println!("Target Discord GameSDK: {sdk_version}");
+    let main_dir = PathBuf::from("libraries");
+    let extract_dir = main_dir.join("discord_game_sdk");
+    create_dir_all(&extract_dir).unwrap();
+    println!("Checking local cache...");
+
+    // Check cached version
+    let version_file_path = extract_dir.join("VERSION");
+    if version_file_path.exists() {
+        match fs::read_to_string(&version_file_path) {
+            Ok(ver) => {
+                if ver == sdk_version {
+                    println!("Version matched, no upgrade required.");
+                    return extract_dir;
+                } else {
+                    println!("Version not matched, an upgrade is required.");
+                }
+            }
+            Err(err) => eprintln!("Error opening VERSION: {err}"),
+        }
+    }
+
+    println!("Clearing cache directory...");
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir).expect("remove directory");
+        fs::create_dir(&extract_dir).expect("create directory");
+    }
+
+    println!("Fetching {sdk_version} SDK...");
+    let download_path = main_dir.join("fetch.zip");
+    reqwest::blocking::get(format!(
+        "https://dl-game-sdk.discordapp.net/{sdk_version}/discord_game_sdk.zip"))
+        .expect("request Discord Game SDK")
+        .copy_to(&mut File::create(&download_path).expect("Discord Game SDK local cache"))
+        .expect("download Discord Game SDK");
+    ZipArchive::new(File::open(&download_path).expect("read download cache"))
+        .expect("valid zip")
+        .extract(&extract_dir)
+        .expect("extract cached zip");
+    fs::remove_file(download_path).expect("remove cached zip");
+    File::create(version_file_path).expect("create VERSION")
+        .write_all(unsafe { sdk_version.as_bytes_mut() }).expect("write VERSION");
+    println!("SDK fetched.");
+
+    // Prepare for library
+
+    fs::rename(extract_dir.join("lib/x86_64/discord_game_sdk.so"),
+               extract_dir.join("lib/x86_64/libdiscord_game_sdk.so")).unwrap();
+    fs::rename(extract_dir.join("lib/x86_64/discord_game_sdk.dylib"),
+               extract_dir.join("lib/x86_64/libdiscord_game_sdk.dylib")).unwrap();
+    fs::rename(extract_dir.join("lib/x86_64/discord_game_sdk.dll.lib"),
+               extract_dir.join("lib/x86_64/discord_game_sdk.lib")).unwrap();
+    fs::rename(extract_dir.join("lib/x86/discord_game_sdk.dll.lib"),
+               extract_dir.join("lib/x86/discord_game_sdk.lib")).unwrap();
+
+    extract_dir
 }
 
 fn verify_installation(target: &str, sdk_path: &Path) {
@@ -125,31 +192,6 @@ impl bindgen::callbacks::ParseCallbacks for Callbacks {
         }
     }
 }
-
-const MISSING_SDK_PATH: &str = r#"
-
-discord_game_sdk_sys: Hello,
-
-You are trying to generate the bindings for the Discord Game SDK.
-You will have to download the SDK yourself.
-Here are the links to get it:
-
-https://discordapp.com/developers/docs/game-sdk/sdk-starter-guide
-https://dl-game-sdk.discordapp.net/latest/discord_game_sdk.zip
-
-Once you have downloaded it, extract the contents to a folder
-and set the environment variable `DISCORD_GAME_SDK_PATH` to its path.
-
-Example:
-
-$ export DISCORD_GAME_SDK_PATH=$HOME/Downloads/discord_game_sdk
-
-Please report any issues you have at:
-https://github.com/ldesgoui/discord_game_sdk
-
-Thanks, and apologies for the inconvenience
-
-"#;
 
 const MISSING_SETUP: &str = r#"
 
